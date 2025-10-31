@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom'; // Link 추가
+import { useParams, Link } from 'react-router-dom'; 
 import { useSelector, useDispatch } from 'react-redux';
 import { toggleFavorite } from '../store/favoritesSlice';
 import { fetchPokemonDetail } from '../api/pokeapi';
-
 
 function Detail() {
   const { id: idString } = useParams();
@@ -13,72 +12,127 @@ function Detail() {
   const favoriteIds = useSelector(state => state.favorites.ids);
   
   const [pokemon, setPokemon] = useState(null);
-  const [evolutionChain, setEvolutionChain] = useState([]); // 진화 정보 상태
+  const [evolutionChain, setEvolutionChain] = useState([]); 
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState(null); 
 
   const isFavorite = favoriteIds.includes(id);
 
-  // 1. API 호출 및 모든 정보(한국어, 특별폼, 진화) 통합 로직
   useEffect(() => {
     if (!id) return; 
 
     setLoading(true);
+    setError(null); 
+
+    const fetchKoreanName = async (url) => {
+        if (!url) return null; 
+        try {
+            const response = await fetch(url);
+            if (!response.ok) return '정보 없음'; 
+            
+            const data = await response.json();
+            const koreanEntry = data.names?.find(name => name.language.name === 'ko');
+            return koreanEntry ? koreanEntry.name : data.name;
+        } catch (error) {
+            console.error("한국어 이름 fetching 에러:", error);
+            return '정보 없음';
+        }
+    };
+
+
+    const processEvolutionChain = async (chainNode, currentPokemonId) => {
+      if (!chainNode.species) return null;
+
+      try {
+          const evoSpeciesResponse = await fetch(chainNode.species.url);
+          const evoSpeciesData = await evoSpeciesResponse.json();
+          const evoKoreanEntry = evoSpeciesData.names.find(name => name.language.name === 'ko');
+          const evoId = evoSpeciesData.id;
+          const evoName = evoKoreanEntry ? evoKoreanEntry.name : evoSpeciesData.name;
+          
+          let evolutionDetails = [];
+          if (chainNode.evolution_details && chainNode.evolution_details.length > 0) {
+              evolutionDetails = await Promise.all(chainNode.evolution_details.map(async (detail) => {
+                  const itemKorean = await fetchKoreanName(detail.item?.url);
+                  const locationKorean = await fetchKoreanName(detail.location?.url);
+                  
+                  return {
+                      trigger: detail.trigger.name,
+                      minLevel: detail.min_level,
+                      item: itemKorean, 
+                      timeOfDay: detail.time_of_day,
+                      minHappiness: detail.min_happiness, 
+                      location: locationKorean,
+                  };
+              }));
+          }
+          
+          const nextEvolutions = await Promise.all(
+              chainNode.evolves_to.map(nextChain => processEvolutionChain(nextChain, currentPokemonId))
+          );
+
+          return {
+              id: evoId,
+              name: evoName,
+              details: evolutionDetails, 
+              isCurrent: evoId === currentPokemonId,
+              evolves_to: nextEvolutions.filter(n => n !== null),
+          };
+      } catch (e) {
+          console.error(`진화 체인 처리 중 오류 발생 (${chainNode.species.name}):`, e);
+          return null; 
+      }
+    };
+
 
     const loadPokemonData = async () => {
       try {
-        // 1. 기본 상세 정보 가져오기
         const detailData = await fetchPokemonDetail(id); 
-
-        // 2. 종(Species) 정보 가져오기
         const speciesResponse = await fetch(detailData.species.url);
         const speciesData = await speciesResponse.json();
         
-        // 3. 한국어 이름 추출
         const koreanEntry = speciesData.names.find(name => name.language.name === 'ko');
         const koreanName = koreanEntry ? koreanEntry.name : detailData.name;
 
-        // 4. 특별 폼 URL 추출 및 데이터 병렬 로드 (메가/원시/오리진)
-        const specialFormUrls = speciesData.varieties
-          .filter(v => 
-            v.is_default === false && 
-            (v.pokemon.name.includes('-mega') || v.pokemon.name.includes('-primal') || v.pokemon.name.includes('-origin'))
-          )
-          .map(v => v.pokemon.url);
+        const specialForms = [];
+        const uniqueFormUrls = new Set();
         
-        const uniqueSpecialFormUrls = [...new Set(specialFormUrls)];
-        const specialFormPromises = uniqueSpecialFormUrls.map(url => fetch(url).then(res => res.json()));
+        speciesData.varieties.forEach(v => {
+            // 🟢 리전 폼 제외 및 큐레무 포함 로직 (변동 없음)
+            if (v.is_default === false && 
+                !v.pokemon.name.includes('-galar') && 
+                !v.pokemon.name.includes('-alola') && 
+                (v.pokemon.name.includes('-mega') || 
+                 v.pokemon.name.includes('-primal') || 
+                 v.pokemon.name.includes('-origin') ||
+                 v.pokemon.name.includes('-form') ||
+                 v.pokemon.name.includes('-alternate') ||
+                 v.pokemon.name.includes('-black') ||
+                 v.pokemon.name.includes('-white')    
+                 )) 
+            {
+                if (!uniqueFormUrls.has(v.pokemon.url)) {
+                    uniqueFormUrls.add(v.pokemon.url);
+                    specialForms.push(v.pokemon.url);
+                }
+            }
+        });
+        
+        const specialFormPromises = specialForms.map(url => fetch(url).then(res => res.json()));
         const specialFormsData = await Promise.all(specialFormPromises);
         
-        // 5. 🟢 진화 체인 정보 가져오기
         const chainUrl = speciesData.evolution_chain.url;
         const chainResponse = await fetch(chainUrl);
         const chainData = await chainResponse.json();
         
-        const flatChain = extractEvolutionChain(chainData.chain); // 진화 정보를 평탄화
+        const hierarchicalChain = await processEvolutionChain(chainData.chain, detailData.id);
         
-        // 6. 평탄화된 진화 체인의 한국어 이름 및 ID 로드
-        const evolutionPromises = flatChain.map(async (evo) => {
-            const evoSpeciesResponse = await fetch(evo.speciesUrl);
-            const evoSpeciesData = await evoSpeciesResponse.json();
-            const evoKoreanEntry = evoSpeciesData.names.find(name => name.language.name === 'ko');
-            const evoId = evoSpeciesData.id;
-            
-            return {
-                id: evoId,
-                name: evoKoreanEntry ? evoKoreanEntry.name : evoSpeciesData.name,
-            };
-        });
-        const fullEvolutionChain = await Promise.all(evolutionPromises);
-
-
-        // 7. 최종 상태 업데이트
         setPokemon({
           ...detailData,
           korean_name: koreanName,    
           special_forms: specialFormsData, 
         });
-        setEvolutionChain(fullEvolutionChain); // 진화 정보 상태 저장
+        setEvolutionChain(hierarchicalChain); 
 
       } catch (err) {
         console.error("포켓몬 정보 로딩 오류:", err);
@@ -91,52 +145,121 @@ function Detail() {
     loadPokemonData();
   }, [id]);
 
-  // 🟢 재귀 함수: 진화 체인을 평탄화하여 이름과 URL만 추출
-  const extractEvolutionChain = (chain) => {
-    let evolutions = [];
-    if (chain.species) {
-        // ID와 이름을 얻기 위해 species URL을 저장
-        evolutions.push({
-            name: chain.species.name, 
-            speciesUrl: chain.species.url,
-        });
+  // 🟢 진화 조건을 텍스트로 변환하는 유틸리티 함수 (로직 개선)
+  const getEvolutionConditionText = (details) => {
+    if (details.length === 0) return '';
+    
+    const detail = details[0]; 
+    let parts = [];
+    
+    // 1. 트리거 조건 (가장 중요)
+    if (detail.trigger === 'trade') {
+        const item = detail.item && detail.item !== '정보 없음' ? detail.item : '';
+        parts.push(item ? `${item} 장착 후 교환` : '통신 교환');
+    } else if (detail.trigger === 'use-item' && detail.item && detail.item !== '정보 없음') {
+        parts.push(`${detail.item} 사용`);
+    } else if (detail.trigger === 'level-up') {
+        if (!detail.minLevel && !detail.minHappiness) {
+            parts.push('레벨 업'); // 레벨이나 친밀도 조건이 없으면 일반 레벨업
+        }
+    }
+    
+    // 2. 레벨 조건
+    if (detail.minLevel) {
+        parts.push(`Lv. ${detail.minLevel}`);
+    }
+    
+    // 3. 친밀도 조건
+    if (detail.minHappiness) { 
+        parts.push(`친밀도 ${detail.minHappiness} 이상`);
     }
 
-    if (chain.evolves_to && chain.evolves_to.length > 0) {
-        chain.evolves_to.forEach(nextChain => {
-            evolutions = evolutions.concat(extractEvolutionChain(nextChain));
-        });
+
+    // 4. 추가 조건 (시간, 장소 등)
+    if (detail.timeOfDay) {
+        const timeText = detail.timeOfDay === 'day' ? '낮' : '밤';
+        // 시간 조건은 항상 마지막에 추가하여 복잡도 줄임
+        parts.push(`(${timeText})`);
     }
-    return evolutions;
+    if (detail.location && detail.location !== '정보 없음') {
+        parts.push(`${detail.location}에서`);
+    }
+    
+    // 중복 제거 및 최종 문자열 생성
+    const uniqueParts = [...new Set(parts)].filter(p => p.trim() !== '');
+    const conditionText = uniqueParts.join(' + ');
+
+    return conditionText.trim() === '' ? '특정 조건' : conditionText;
   };
 
-
-  const handleToggleFavorite = () => {
-    dispatch(toggleFavorite(id)); 
-  };
-
+  // 🟢 폼 이름을 분류하여 표시하는 유틸리티 함수 (변동 없음)
   const getFormDisplayName = (formName, baseName) => {
-    const base = baseName.toUpperCase();
     let displayName = formName.toUpperCase();
     
-    if (displayName.startsWith(base)) {
-      displayName = displayName.substring(base.length);
-    }
-    
-    displayName = displayName.replace(/-/g, ' ').trim();
-    
-    if (!displayName) {
-        if (formName.includes('-mega')) return "MEGA";
-        if (formName.includes('-primal')) return "PRIMAL";
-        return "SPECIAL FORM";
-    }
+    if (displayName.includes('-MEGA')) return '메가 진화';
+    if (displayName.includes('-PRIMAL')) return '원시 회귀';
+    if (displayName.includes('-BLACK')) return '블랙 큐레무'; 
+    if (displayName.includes('-WHITE')) return '화이트 큐레무'; 
+    if (displayName.includes('-FORM') || displayName.includes('-ALTERNATE')) return '폼 체인지';
 
-    return displayName;
+    const base = baseName.toUpperCase();
+    if (displayName.startsWith(base)) {
+        displayName = displayName.substring(base.length);
+    }
+    return displayName.replace(/-/g, ' ').trim() || '특수 폼';
+  };
+
+  // 찜 목록 핸들러
+  const handleToggleFavorite = () => {
+    dispatch(toggleFavorite(id)); 
   };
 
   if (loading) return <div style={{ textAlign: 'center' }}>로딩 중...</div>;
   if (error) return <div style={{ textAlign: 'center', color: 'red' }}>에러: {error}</div>;
   if (!pokemon) return <div style={{ textAlign: 'center' }}>포켓몬 정보를 찾을 수 없습니다.</div>;
+
+  // 🟢 진화 체인 렌더링 함수 (index 제거, 변동 없음)
+  const renderEvolution = (evoNode) => {
+    if (!evoNode) return null;
+
+    const isCurrent = evoNode.id === pokemon.id;
+    const isBranch = evoNode.evolves_to.length > 1;
+
+    return (
+        <div key={evoNode.id} style={{ display: 'flex', flexDirection: isBranch ? 'column' : 'row', alignItems: 'center' }}>
+            <div style={{ textAlign: 'center', margin: '0 10px' }}>
+                <Link to={`/pokemon/${evoNode.id}`} style={{ textDecoration: 'none', color: '#333' }}>
+                    <img 
+                        src={`https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${evoNode.id}.png`}
+                        alt={evoNode.name}
+                        style={{ width: '96px', height: '96px', border: isCurrent ? '3px solid #007bff' : '1px solid #ddd', borderRadius: '50%' }}
+                    />
+                    <p style={{ margin: '5px 0 0 0', fontWeight: 'bold' }}>{evoNode.name}</p>
+                </Link>
+            </div>
+
+            {evoNode.evolves_to.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: isBranch ? 'column' : 'row', alignItems: 'center', marginLeft: isBranch ? 0 : '10px' }}>
+                    {evoNode.evolves_to.map((nextEvo) => (
+                        <div key={nextEvo.id} style={{ display: 'flex', alignItems: 'center', margin: isBranch ? '10px 0' : '0' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: isBranch ? '0 10px' : '0 15px' }}>
+                                <span style={{ fontSize: '24px', color: '#555' }}>{isBranch ? '⬇️' : '➡️'}</span>
+                                {nextEvo.details.length > 0 && (
+                                    <p style={{ fontSize: '12px', color: '#888', margin: '2px 0 0 0', whiteSpace: 'nowrap' }}>
+                                        ({getEvolutionConditionText(nextEvo.details)})
+                                    </p>
+                                )}
+                            </div>
+                            
+                            {renderEvolution(nextEvo)}
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+  };
+
 
   return (
     <div style={{ padding: '20px', textAlign: 'center' }}>
@@ -165,30 +288,15 @@ function Detail() {
       {/* --- 진화 정보 --- */}
       <div style={{ marginTop: '40px', borderTop: '2px solid #ccc', paddingTop: '20px' }}>
           <h3>🧬 진화 체인</h3>
-          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
-            {evolutionChain.map((evo, index) => (
-                <React.Fragment key={evo.id}>
-                    <Link to={`/pokemon/${evo.id}`} style={{ textDecoration: 'none', color: '#333', textAlign: 'center' }}>
-                        <img 
-                            src={`https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${evo.id}.png`}
-                            alt={evo.name}
-                            style={{ width: '96px', height: '96px', border: evo.id === pokemon.id ? '3px solid #007bff' : 'none', borderRadius: '50%' }}
-                        />
-                        <p style={{ margin: '5px 0 0 0', fontWeight: 'bold' }}>{evo.name}</p>
-                    </Link>
-                    {/* 다음 진화 단계가 있다면 화살표 표시 */}
-                    {index < evolutionChain.length - 1 && (
-                        <span style={{ fontSize: '24px', color: '#555' }}>➡️</span>
-                    )}
-                </React.Fragment>
-            ))}
+          <div style={{ display: 'flex', justifyContent: 'center', flexWrap: 'wrap' }}>
+            {evolutionChain && renderEvolution(evolutionChain)}
           </div>
       </div>
       
-      {/* --- 특별 폼 (메가/원시) --- */}
+      {/* --- 특별 폼 (메가/원시/폼체인지) --- */}
       {pokemon.special_forms && pokemon.special_forms.length > 0 && (
         <div style={{ marginTop: '40px', borderTop: '2px solid #ccc', paddingTop: '20px' }}>
-          <h3>🌟 특별 폼 (메가 진화/원시 회귀)</h3>
+          <h3>✨ 특별 폼</h3>
           <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '20px' }}>
             {pokemon.special_forms.map(form => (
               <div key={form.id} style={{ border: '1px solid #ddd', padding: '15px', borderRadius: '8px', minWidth: '150px' }}>
@@ -203,7 +311,7 @@ function Detail() {
                   style={{ width: '150px', height: '150px' }} 
                 />
                 <p style={{ fontSize: '14px', margin: '5px 0' }}>
-                  **타입:** {form.types.map(t => t.type.name).join(' / ')} 
+                  **타입:** {form.types.map(t => t.type.name.toUpperCase()).join(' / ')} 
                 </p>
               </div>
             ))}
