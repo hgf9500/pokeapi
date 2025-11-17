@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useSelector } from 'react-redux';
 import { Link } from 'react-router-dom';
-import { fetchPokemonDetail } from '../api/pokeapi';
+import { fetchPokemonDetail } from '../api/pokeapi.js';
 
 
 
