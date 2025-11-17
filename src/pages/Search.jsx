@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { fetchPokemonList } from '../api/pokeapi';
+import { fetchPokemonList } from '../api/pokeapi.js';
  
 
 
