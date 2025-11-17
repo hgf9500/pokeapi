@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom'; 
 import { useSelector, useDispatch } from 'react-redux';
 import { toggleFavorite } from '../store/favoritesSlice'; 
-import { fetchPokemonDetail } from '../api/pokeapi.js';
+import { fetchPokemonDetail } from '@api/pokeapi.js';
+
 
 // 🟢 포켓몬 타입 한국어 매핑 추가
 const typeKoreanMap = {
